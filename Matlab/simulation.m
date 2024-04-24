@@ -19,13 +19,11 @@ clc
 addpath('splines');
 %% Load Parameters
 CarModel = 'ORCA';
-% CarModel = 'FullSize';
+MPC_vars    = getMPC_vars(CarModel);
+ModelParams = getModelParams(MPC_vars.ModelNo);
 
-MPC_vars = getMPC_vars(CarModel);
-ModelParams=getModelParams(MPC_vars.ModelNo);
 % choose optimization interface options: 'Yalmip','CVX','hpipm','quadprog'
 MPC_vars.interface = 'hpipm';
-
 
 nx = ModelParams.nx;
 nu = ModelParams.nu;
@@ -33,34 +31,31 @@ N = MPC_vars.N;
 Ts = MPC_vars.Ts;
 %% import an plot track
 % use normal ORCA Track
-load Tracks/track2.mat
-% use RCP track
-% load Tracks/trackMobil.mat
-% track2 = trackMobil;
-% shrink track by half of the car widht plus safety margin
+%load Tracks/track2.mat
+load Tracks/track3.mat
+
+% shrink track by half of the car width plus safety margin
 % TODO implement orientation depending shrinking in the MPC constraints
-safteyScaling = 1.5;
-[track,track2] = borderAdjustment(track2,ModelParams,safteyScaling);
+safetyScaling = 1.5;
+[track,track2] = borderAdjustment(track3,ModelParams,safetyScaling);
 
 trackWidth = norm(track.inner(:,1)-track.outer(:,1));
 % plot shrinked and not shrinked track 
 figure(1);
-plot(track.outer(1,:),track.outer(2,:),'r')
-hold on
-plot(track.inner(1,:),track.inner(2,:),'r')
-plot(track2.outer(1,:),track2.outer(2,:),'k')
-plot(track2.inner(1,:),track2.inner(2,:),'k')
-%% Simulation lenght and plotting
-simN = 500;
+plot(track.outer(1,:),track.outer(2,:),'r'); hold on;
+plot(track.inner(1,:),track.inner(2,:),'r');
+plot(track2.outer(1,:),track2.outer(2,:),'k');
+plot(track2.inner(1,:),track2.inner(2,:),'k');
+
+%% Simulation length / plotting
+simN = 400;
 %0=no plots, 1=plot predictions
 plotOn = 1;
 %0=real time iteration, 1=fixed number of QP iterations, 2=fixed number of damped QP iterations
 QP_iter = 2;
-% number of cars 
-% there are two examples one with no other cars and one with 4 other cars
-% (inspired by the set up shown in the paper)
-% n_cars = 1; % no other car
-n_cars = 5; % 4 other cars
+
+% This turns off the other cars
+n_cars = 1;
 %% Fit spline to track
 % TODO spline function only works with regular spaced points.
 % Fix add function which given any center line and bound generates equlally
@@ -71,7 +66,7 @@ tl = traj.ppy.breaks(end);
 % store all data in one struct
 TrackMPC = struct('traj',traj,'borders',borders,'track_center',track.center,'tl',tl);
 %% Define starting position
-startIdx = 1; %point (in terms of track centerline array) allong the track 
+startIdx = 1; %point (in terms of track centerline array) along the track 
 % where the car starts, on the center line, aligned with the track, driving
 % straight with vx0
 %since the used bicycle model is not well defined for slow velocities use vx0 > 0.5
@@ -82,7 +77,18 @@ elseif CarModel == "FullSize"
 end
 
 % find theta that coresponds to the 10th point on the centerline
-[theta, ~] = findTheta([track.center(1,startIdx),track.center(2,startIdx)],track.center,traj.ppx.breaks,trackWidth,startIdx);
+% theta is the arc length \in [0, L]
+% the reference path is parameterized by arc length \theta using third
+% order splines, offline fitted over the center line.
+% To get the X, Y position of the reference line, you just evaluate this
+% spline.
+% The angle of the tangent to the path at the reference point = arctan
+% \partial Y ref (\theta) / \partial X ref \theta
+[theta, ~] = findTheta([track.center(1,startIdx), track.center(2,startIdx)], ...
+                        track.center, ...
+                        traj.ppx.breaks, ...
+                        trackWidth, ...
+                        startIdx);
 
 x0 = [track.center(1,startIdx),track.center(2,startIdx),... % point on centerline
       atan2(ppval(traj.dppy,theta),ppval(traj.dppx,theta)),... % aligned with centerline
@@ -114,12 +120,9 @@ end
 
 u = zeros(3,N); % zero inputs
 uprev = zeros(3,1); % last input is zero
-%% Ohter cars
-Y = ObstacelsState(track,traj,trackWidth,n_cars);
+%% Other cars
+Y = []; % we are not interested in obstacle avoidance for our project
 
-if size(Y,2) ~= n_cars-1
-    error('n_cars and the number of obstacles in "Y" does not match')
-end
 %% Initialize logging arrays
 X_log = zeros(nx*(N+1),simN);
 U_log = zeros(3*N,simN);
@@ -140,6 +143,7 @@ for i = 1:5
         PlotPrediction(x,u,b,Y,track,track2,traj,MPC_vars,ModelParams)
     end
 end
+
 %% Simulation
 for i = 1: simN
     
@@ -198,10 +202,10 @@ for i = 1: simN
     
 end
 
-
 PlotLog( X_log,U_log,Y,track,track2,simN,Ts)
 
-%% Generating Stats
+% %% Generating Stats
+LapStart=[];
 a = 1;
 for i=1:simN-1
     if X_log(ModelParams.stateindex_theta,i+1) - X_log(ModelParams.stateindex_theta,i) < -0.9*tl
